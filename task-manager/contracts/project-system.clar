@@ -59,17 +59,19 @@
 
 ;; Private Functions
 (define-private (verify-project-ownership (project-identifier uint) (requesting-address principal))
-    (let ((project-data (unwrap! (map-get? ProjectDetails { project-identifier: project-identifier }) ERR-PROJECT-NOT-FOUND)))
-        (is-eq (get project-owner project-data) requesting-address)
+    (match (map-get? ProjectDetails { project-identifier: project-identifier })
+        project-data (is-eq (get project-owner project-data) requesting-address)
+        false
     )
 )
 
 (define-private (verify-team-membership (project-identifier uint) (requesting-address principal))
-    (let ((project-data (unwrap! (map-get? ProjectDetails { project-identifier: project-identifier }) ERR-PROJECT-NOT-FOUND)))
-        (or
+    (match (map-get? ProjectDetails { project-identifier: project-identifier })
+        project-data (or
             (is-eq (get project-owner project-data) requesting-address)
             (is-some (index-of (get project-team-members project-data) requesting-address))
         )
+        false
     )
 )
 
