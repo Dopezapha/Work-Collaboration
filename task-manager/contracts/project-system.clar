@@ -9,6 +9,7 @@
 (define-constant ERR-INSUFFICIENT-PROJECT-FUNDS (err u104))
 (define-constant ERR-DUPLICATE-PROJECT-ID (err u105))
 (define-constant ERR-DUPLICATE-TASK-ID (err u106))
+(define-constant ERR-INVALID-INPUT (err u107))
 
 ;; Data Maps
 (define-map ProjectDetails
@@ -85,11 +86,15 @@
 )
 
 (define-private (generate-task-identifier (project-identifier uint))
-    (let ((sequence-data (default-to { current-sequence: u0 } (map-get? TaskSequence { project-identifier: project-identifier }))))
-        (begin
-            (map-set TaskSequence { project-identifier: project-identifier } { current-sequence: (+ (get current-sequence sequence-data) u1) })
-            (get current-sequence sequence-data)
-        )
+    (match (map-get? ProjectDetails { project-identifier: project-identifier })
+        project-data 
+            (let ((sequence-data (default-to { current-sequence: u0 } (map-get? TaskSequence { project-identifier: project-identifier }))))
+                (begin
+                    (map-set TaskSequence { project-identifier: project-identifier } { current-sequence: (+ (get current-sequence sequence-data) u1) })
+                    (ok (get current-sequence sequence-data))
+                )
+            )
+        (err ERR-PROJECT-NOT-FOUND)
     )
 )
 
@@ -100,20 +105,27 @@
             (project-identifier (generate-project-identifier))
             (project-creator tx-sender)
         )
-        (begin
-            (map-set ProjectDetails
-                { project-identifier: project-identifier }
-                {
-                    project-owner: project-creator,
-                    project-title: project-title,
-                    project-description: project-description,
-                    project-budget: project-budget,
-                    project-status: "active",
-                    project-creation-time: block-height,
-                    project-team-members: (list)
-                }
+        (if (and 
+                (> (len project-title) u0)
+                (> (len project-description) u0)
+                (> project-budget u0)
             )
-            (ok project-identifier)
+            (begin
+                (map-set ProjectDetails
+                    { project-identifier: project-identifier }
+                    {
+                        project-owner: project-creator,
+                        project-title: project-title,
+                        project-description: project-description,
+                        project-budget: project-budget,
+                        project-status: "active",
+                        project-creation-time: block-height,
+                        project-team-members: (list)
+                    }
+                )
+                (ok project-identifier)
+            )
+            ERR-INVALID-INPUT
         )
     )
 )
@@ -122,17 +134,23 @@
     (let
         (
             (requesting-address tx-sender)
-            (project-data (unwrap! (map-get? ProjectDetails { project-identifier: project-identifier }) ERR-PROJECT-NOT-FOUND))
         )
-        (if (verify-project-ownership project-identifier requesting-address)
-            (begin
-                (map-set ProjectDetails
-                    { project-identifier: project-identifier }
-                    (merge project-data { project-team-members: (unwrap! (as-max-len? (append (get project-team-members project-data) new-member-address) u20) ERR-UNAUTHORIZED-ACCESS) })
+        (match (map-get? ProjectDetails { project-identifier: project-identifier })
+            project-data
+                (if (is-eq (get project-owner project-data) requesting-address)
+                    (if (is-some (index-of (get project-team-members project-data) new-member-address))
+                        ERR-INVALID-INPUT
+                        (begin
+                            (map-set ProjectDetails
+                                { project-identifier: project-identifier }
+                                (merge project-data { project-team-members: (unwrap! (as-max-len? (append (get project-team-members project-data) new-member-address) u20) ERR-UNAUTHORIZED-ACCESS) })
+                            )
+                            (ok true)
+                        )
+                    )
+                    ERR-UNAUTHORIZED-ACCESS
                 )
-                (ok true)
-            )
-            ERR-UNAUTHORIZED-ACCESS
+            ERR-PROJECT-NOT-FOUND
         )
     )
 )
@@ -148,25 +166,44 @@
     (let
         (
             (requesting-address tx-sender)
-            (task-identifier (generate-task-identifier project-identifier))
         )
-        (if (verify-project-ownership project-identifier requesting-address)
-            (begin
-                (map-set TaskDetails
-                    { project-identifier: project-identifier, task-identifier: task-identifier }
-                    {
-                        task-assignee: assigned-member,
-                        task-title: task-title,
-                        task-description: task-description,
-                        task-due-date: task-deadline,
-                        task-payment-amount: task-reward,
-                        task-status: "pending",
-                        task-creation-time: block-height
-                    }
+        (match (map-get? ProjectDetails { project-identifier: project-identifier })
+            project-data
+                (if (is-eq (get project-owner project-data) requesting-address)
+                    (if (and 
+                            (> (len task-title) u0)
+                            (> (len task-description) u0)
+                            (> task-deadline block-height)
+                            (> task-reward u0)
+                            (or
+                                (is-eq assigned-member (get project-owner project-data))
+                                (is-some (index-of (get project-team-members project-data) assigned-member))
+                            )
+                        )
+                        (match (generate-task-identifier project-identifier)
+                            task-identifier
+                                (begin
+                                    (map-set TaskDetails
+                                        { project-identifier: project-identifier, task-identifier: task-identifier }
+                                        {
+                                            task-assignee: assigned-member,
+                                            task-title: task-title,
+                                            task-description: task-description,
+                                            task-due-date: task-deadline,
+                                            task-payment-amount: task-reward,
+                                            task-status: "pending",
+                                            task-creation-time: block-height
+                                        }
+                                    )
+                                    (ok task-identifier)
+                                )
+                            error ERR-PROJECT-NOT-FOUND
+                        )
+                        ERR-INVALID-INPUT
+                    )
+                    ERR-UNAUTHORIZED-ACCESS
                 )
-                (ok task-identifier)
-            )
-            ERR-UNAUTHORIZED-ACCESS
+            ERR-PROJECT-NOT-FOUND
         )
     )
 )
@@ -175,17 +212,27 @@
     (let
         (
             (requesting-address tx-sender)
-            (task-data (unwrap! (map-get? TaskDetails { project-identifier: project-identifier, task-identifier: task-identifier }) ERR-TASK-NOT-FOUND))
         )
-        (if (or (verify-project-ownership project-identifier requesting-address) (is-eq (get task-assignee task-data) requesting-address))
-            (begin
-                (map-set TaskDetails
-                    { project-identifier: project-identifier, task-identifier: task-identifier }
-                    (merge task-data { task-status: new-task-status })
+        (match (map-get? ProjectDetails { project-identifier: project-identifier })
+            project-data
+                (match (map-get? TaskDetails { project-identifier: project-identifier, task-identifier: task-identifier })
+                    task-data
+                        (if (or (is-eq (get project-owner project-data) requesting-address) (is-eq (get task-assignee task-data) requesting-address))
+                            (if (> (len new-task-status) u0)
+                                (begin
+                                    (map-set TaskDetails
+                                        { project-identifier: project-identifier, task-identifier: task-identifier }
+                                        (merge task-data { task-status: new-task-status })
+                                    )
+                                    (ok true)
+                                )
+                                ERR-INVALID-INPUT
+                            )
+                            ERR-UNAUTHORIZED-ACCESS
+                        )
+                    ERR-TASK-NOT-FOUND
                 )
-                (ok true)
-            )
-            ERR-UNAUTHORIZED-ACCESS
+            ERR-PROJECT-NOT-FOUND
         )
     )
 )
@@ -194,59 +241,71 @@
     (let
         (
             (requesting-address tx-sender)
-            (task-data (unwrap! (map-get? TaskDetails { project-identifier: project-identifier, task-identifier: task-identifier }) ERR-TASK-NOT-FOUND))
-            (project-data (unwrap! (map-get? ProjectDetails { project-identifier: project-identifier }) ERR-PROJECT-NOT-FOUND))
         )
-        (if (and
-                (is-eq (get task-assignee task-data) requesting-address)
-                (is-eq (get task-status task-data) "pending")
-            )
-            (begin
-                (try! (stx-transfer? (get task-payment-amount task-data) (get project-owner project-data) requesting-address))
-                (map-set TaskDetails
-                    { project-identifier: project-identifier, task-identifier: task-identifier }
-                    (merge task-data { task-status: "completed" })
+        (match (map-get? ProjectDetails { project-identifier: project-identifier })
+            project-data
+                (match (map-get? TaskDetails { project-identifier: project-identifier, task-identifier: task-identifier })
+                    task-data
+                        (if (and
+                                (is-eq (get task-assignee task-data) requesting-address)
+                                (is-eq (get task-status task-data) "pending")
+                            )
+                            (begin
+                                (try! (stx-transfer? (get task-payment-amount task-data) (get project-owner project-data) requesting-address))
+                                (map-set TaskDetails
+                                    { project-identifier: project-identifier, task-identifier: task-identifier }
+                                    (merge task-data { task-status: "completed" })
+                                )
+                                ;; Update team member metrics
+                                (let ((member-metrics (default-to
+                                        { completed-task-count: u0, total-earnings: u0, performance-rating: u0, rating-count: u0 }
+                                        (map-get? TeamMemberMetrics { team-member-address: requesting-address })
+                                    )))
+                                    (map-set TeamMemberMetrics
+                                        { team-member-address: requesting-address }
+                                        {
+                                            completed-task-count: (+ (get completed-task-count member-metrics) u1),
+                                            total-earnings: (+ (get total-earnings member-metrics) (get task-payment-amount task-data)),
+                                            performance-rating: (get performance-rating member-metrics),
+                                            rating-count: (get rating-count member-metrics)
+                                        }
+                                    )
+                                )
+                                (ok true)
+                            )
+                            ERR-UNAUTHORIZED-ACCESS
+                        )
+                    ERR-TASK-NOT-FOUND
                 )
-                ;; Update team member metrics
-                (let ((member-metrics (default-to
-                        { completed-task-count: u0, total-earnings: u0, performance-rating: u0, rating-count: u0 }
-                        (map-get? TeamMemberMetrics { team-member-address: requesting-address })
-                    )))
-                    (map-set TeamMemberMetrics
-                        { team-member-address: requesting-address }
-                        {
-                            completed-task-count: (+ (get completed-task-count member-metrics) u1),
-                            total-earnings: (+ (get total-earnings member-metrics) (get task-payment-amount task-data)),
-                            performance-rating: (get performance-rating member-metrics),
-                            rating-count: (get rating-count member-metrics)
-                        }
-                    )
-                )
-                (ok true)
-            )
-            ERR-UNAUTHORIZED-ACCESS
+            ERR-PROJECT-NOT-FOUND
         )
     )
 )
 
 (define-public (submit-member-rating (rated-member principal) (rating-score uint))
-    (if (and (>= rating-score u1) (<= rating-score u5))
-        (let ((member-metrics (default-to
-                { completed-task-count: u0, total-earnings: u0, performance-rating: u0, rating-count: u0 }
-                (map-get? TeamMemberMetrics { team-member-address: rated-member })
-            )))
+    (if (and 
+            (>= rating-score u1) 
+            (<= rating-score u5)
+        )
+        (let
+            (
+                (existing-metrics (default-to
+                    { completed-task-count: u0, total-earnings: u0, performance-rating: u0, rating-count: u0 }
+                    (map-get? TeamMemberMetrics { team-member-address: rated-member })
+                ))
+            )
             (map-set TeamMemberMetrics
                 { team-member-address: rated-member }
                 {
-                    completed-task-count: (get completed-task-count member-metrics),
-                    total-earnings: (get total-earnings member-metrics),
-                    performance-rating: (/ (+ (* (get performance-rating member-metrics) (get rating-count member-metrics)) rating-score) (+ (get rating-count member-metrics) u1)),
-                    rating-count: (+ (get rating-count member-metrics) u1)
+                    completed-task-count: (get completed-task-count existing-metrics),
+                    total-earnings: (get total-earnings existing-metrics),
+                    performance-rating: (/ (+ (* (get performance-rating existing-metrics) (get rating-count existing-metrics)) rating-score) (+ (get rating-count existing-metrics) u1)),
+                    rating-count: (+ (get rating-count existing-metrics) u1)
                 }
             )
             (ok true)
         )
-        ERR-INVALID-STATUS-UPDATE
+        ERR-INVALID-INPUT
     )
 )
 
